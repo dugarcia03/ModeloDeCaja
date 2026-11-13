@@ -45,6 +45,11 @@ import matplotlib
 matplotlib.use("Agg")  # backend sin pantalla (guarda figuras a archivo)
 import matplotlib.pyplot as plt
 
+# Carpeta donde reside este script. Todos los archivos de entrada/salida se
+# resuelven respecto a esta carpeta, de modo que el script funcione sin importar
+# desde que directorio se ejecute (o con doble clic).
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # =============================================================================
 #  >>>>>>>>>>>>>>>>>>>>>>  CONFIGURACION (EDITAR AQUI)  <<<<<<<<<<<<<<<<<<<<<<<
 # =============================================================================
@@ -97,19 +102,16 @@ ESCENARIO_REDUCCION = 0.30
 # Si la lista esta vacia, se aplica la reduccion a TODA la emision.
 ESCENARIO_PREFIJOS  = ["BS_DSEL", "BA_DSEL", "AT_DSEL"]
 
-# ---- Verificacion con el ejemplo del profesor (caso CO) ----
-EJECUTAR_VERIFICACION = True
-
-# ---- Archivos de entrada ----
-ARCH_INV_CMB  = "Summary of CMB_2023m3_adj2.nc.xlsx"
-ARCH_INV_FF   = "Summary of FF_2023v2.nc.xlsx"
-ARCH_INV_RDST = "Summary of RDST_2023m3_adj2.nc.xlsx"
-ARCH_ERA5     = "CapaDeMezcla.csv"
-ARCH_EST_CAR  = "StationsReport_20261012223526.xlsx"  # Centro de Alto Rendimiento
-ARCH_EST_GUA  = "StationsReport_20261012223539.xlsx"  # Guaymaral
+# ---- Archivos de entrada (se resuelven respecto a la carpeta del script) ----
+ARCH_INV_CMB  = os.path.join(BASE_DIR, "Summary of CMB_2023m3_adj2.nc.xlsx")
+ARCH_INV_FF   = os.path.join(BASE_DIR, "Summary of FF_2023v2.nc.xlsx")
+ARCH_INV_RDST = os.path.join(BASE_DIR, "Summary of RDST_2023m3_adj2.nc.xlsx")
+ARCH_ERA5     = os.path.join(BASE_DIR, "CapaDeMezcla.csv")
+ARCH_EST_CAR  = os.path.join(BASE_DIR, "StationsReport_20261012223526.xlsx")  # Centro de Alto Rendimiento
+ARCH_EST_GUA  = os.path.join(BASE_DIR, "StationsReport_20261012223539.xlsx")  # Guaymaral
 
 # ---- Archivos de salida ----
-DIR_SALIDA    = "resultados"
+DIR_SALIDA    = os.path.join(BASE_DIR, "resultados")
 
 # =============================================================================
 #  Mapeo de nombres: cada contaminante -> como se llama en inventario y estacion
@@ -380,49 +382,6 @@ def metricas(sim, obs):
 
 
 # =============================================================================
-#  7) VERIFICACION CON EL EJEMPLO DEL PROFESOR (caso CO)
-# =============================================================================
-def verificacion_ejemplo_profesor():
-    """Reproduce el caso de CO de la presentacion:
-       k1=0, C0=0.3 ppm, u=2 m/s, H=200 m, L=20 km, W=40 km,
-       Q = 118.69 Ton/h, b ~ 0. Integra desde las 3am.
-       Comprueba que C crece y tiende al estado estacionario Q/(uWH)+b."""
-    L = 20_000.0
-    W = 40_000.0
-    H = 200.0
-    u = 2.0
-    k1 = 0.0
-    C0_ppm = 0.3
-    Q_ton_h = 118.69
-    Q_gh = Q_ton_h * 1e6  # ton/h -> g/h
-    b_ppm = 0.0
-
-    pm = MAPEO["CO"]["peso_mol"]
-    C0 = ppm_a_gm3(C0_ppm, pm)
-    b = ppm_a_gm3(b_ppm, pm)
-
-    # estado estacionario teorico: C_ss = Q/(u W H) + b   (con u en m/h)
-    u_h = u * 3600.0
-    C_ss = Q_gh / (u_h * W * H) + b   # g/m3  (nota: u/L cancela con L en Q/(WLH))
-    C_ss_ppm = gm3_a_ppm(C_ss, pm)
-
-    # integrar 20 horas con paso de 1 h
-    C = C0
-    serie = [gm3_a_ppm(C, pm)]
-    for _ in range(20):
-        C = paso_box_model(C, Q_gh, b, u, H, L, W, k1, dt_h=1.0)
-        serie.append(gm3_a_ppm(C, pm))
-
-    print("  [Verificacion ejemplo profesor - CO]")
-    print(f"    C0 = {C0_ppm} ppm  ->  C(1h) = {serie[1]:.3f} ppm  ...  "
-          f"C(20h) = {serie[-1]:.3f} ppm")
-    print(f"    Estado estacionario teorico C_ss = {C_ss_ppm:.3f} ppm")
-    ok = serie[-1] > serie[0] and abs(serie[-1] - C_ss_ppm) / C_ss_ppm < 0.05
-    print(f"    La concentracion crece hacia C_ss: {'OK' if ok else 'REVISAR'}")
-    return ok
-
-
-# =============================================================================
 #  PROGRAMA PRINCIPAL
 # =============================================================================
 def main():
@@ -441,11 +400,6 @@ def main():
     print(f" Ventana: {FECHA_INICIO} 00:00  +{N_DIAS} dias ({N_DIAS*24} h)  "
           f"|  Caja: {L_KM} x {W_KM} km  |  k1 = {k1} 1/h")
     print("=" * 75)
-
-    # --- Verificacion del motor ---
-    if EJECUTAR_VERIFICACION:
-        verificacion_ejemplo_profesor()
-        print("-" * 75)
 
     idx = ventana_horaria()
 
