@@ -127,12 +127,23 @@ ESCENARIO_FACTORES = [
 ]
 
 # ---- Archivos de entrada (se resuelven respecto a la carpeta del script) ----
+#
+# COMO CAMBIAR DE SEMANA / ESTACION:
+#   1) Descarga de IBOCA/RMCAB los nuevos reportes de estacion (CAR y Guaymaral)
+#      para la semana que quieras, con el contaminante que necesites (p.ej. SO2).
+#   2) Pon los archivos en ESTA misma carpeta.
+#   3) Cambia abajo el nombre de ARCH_EST_CAR y ARCH_EST_GUA por los nuevos.
+#   4) Ajusta FECHA_INICIO (arriba) para que coincida con la nueva semana.
+#   5) Si cambia la capa de mezcla, re-descargala con get_era5.py para esa semana
+#      y reemplaza CapaDeMezcla.csv.
+#   Los INVENTARIOS de emisiones (2023) NO cambian: se mantienen igual.
+#
 ARCH_INV_CMB  = os.path.join(BASE_DIR, "Summary of CMB_2023m3_adj2.nc.xlsx")
 ARCH_INV_FF   = os.path.join(BASE_DIR, "Summary of FF_2023v2.nc.xlsx")
 ARCH_INV_RDST = os.path.join(BASE_DIR, "Summary of RDST_2023m3_adj2.nc.xlsx")
 ARCH_ERA5     = os.path.join(BASE_DIR, "CapaDeMezcla.csv")
-ARCH_EST_CAR  = os.path.join(BASE_DIR, "StationsReport_20261012223526.xlsx")  # Centro de Alto Rendimiento
-ARCH_EST_GUA  = os.path.join(BASE_DIR, "StationsReport_20261012223539.xlsx")  # Guaymaral
+ARCH_EST_CAR  = os.path.join(BASE_DIR, "StationsReport_20261012223526.xlsx")  # Centro de Alto Rendimiento (validacion)
+ARCH_EST_GUA  = os.path.join(BASE_DIR, "StationsReport_20261012223539.xlsx")  # Guaymaral (fondo)
 
 # ---- Archivos de salida ----
 DIR_SALIDA    = os.path.join(BASE_DIR, "resultados")
@@ -140,19 +151,25 @@ DIR_SALIDA    = os.path.join(BASE_DIR, "resultados")
 # =============================================================================
 #  Mapeo de nombres: cada contaminante -> como se llama en inventario y estacion
 # =============================================================================
-# hoja_inv:   nombre base de la hoja "<X>_profile" en los inventarios
-# col_est:    nombre de la columna en los reportes de estacion (CAR / Guaymaral)
-# unidad_est: unidad de la estacion (solo informativo)
-# pm_micro:   True si la estacion lo reporta en ug/m3 (PM); False si ppm/ppb (gases)
+# hoja_inv:   nombre(s) base de la hoja "<X>_profile" en los inventarios.
+#             Puede ser una lista si distintos inventarios lo nombran diferente
+#             (p.ej. SO2 aparece como "SOx" en CMB y como "SO2" en FF).
+# col_car:    nombre de la columna en el reporte de la estacion CAR (validacion).
+# col_gua:    nombre de la columna en el reporte de Guaymaral (fondo).
+# unidad_est: unidad de la estacion ("ppm", "ppb" o "ug/m3").
+# es_pm:      True si es material particulado (estacion en ug/m3); False si gas.
+# peso_mol:   peso molecular [g/mol] para convertir ppm<->ug/m3 (solo gases).
 MAPEO = {
-    "CO":   {"hoja_inv": "CO",   "col_car": "CO",    "col_gua": "CO",
+    "CO":   {"hoja_inv": ["CO"],         "col_car": "CO",    "col_gua": "CO",
              "unidad_est": "ppm", "es_pm": False, "peso_mol": 28.01},
-    "PM25": {"hoja_inv": "PM25", "col_car": "PM2.5", "col_gua": "PM2.5",
+    "PM25": {"hoja_inv": ["PM25"],       "col_car": "PM2.5", "col_gua": "PM2.5",
              "unidad_est": "ug/m3", "es_pm": True, "peso_mol": None},
-    "PM10": {"hoja_inv": "PM10", "col_car": "PM10",  "col_gua": "PM10",
+    "PM10": {"hoja_inv": ["PM10"],       "col_car": "PM10",  "col_gua": "PM10",
              "unidad_est": "ug/m3", "es_pm": True, "peso_mol": None},
-    "NOX":  {"hoja_inv": "NOx",  "col_car": "NOX",   "col_gua": "NOX",
+    "NOX":  {"hoja_inv": ["NOx"],        "col_car": "NOX",   "col_gua": "NOX",
              "unidad_est": "ppb", "es_pm": False, "peso_mol": 46.01},
+    "SO2":  {"hoja_inv": ["SO2", "SOx"], "col_car": "SO2",   "col_gua": "SO2",
+             "unidad_est": "ppb", "es_pm": False, "peso_mol": 64.07},
 }
 
 # Constantes fisicas / de conversion
@@ -197,15 +214,21 @@ def tipo_dia(ts):
 # =============================================================================
 #  1) LECTURA DE INVENTARIOS -> Q(t) horaria por tipo de dia
 # =============================================================================
-def leer_perfil_inventario(archivo, hoja_base):
-    """Lee una hoja '<X>_profile' y devuelve un DataFrame largo con columnas:
-    ['wdy','Category', 0..23] y los valores de emision (kg/h) por hora.
-    Devuelve None si la hoja no existe (p.ej. CO no esta en RDST)."""
+def leer_perfil_inventario(archivo, hojas_base):
+    """Lee la hoja '<X>_profile' (probando varios nombres posibles en
+    'hojas_base') y devuelve un DataFrame con columnas ['wdy','Category', 0..23]
+    y los valores de emision (kg/h) por hora.
+    Devuelve None si ninguna hoja existe (p.ej. CO no esta en RDST)."""
+    if isinstance(hojas_base, str):
+        hojas_base = [hojas_base]
     xl = pd.ExcelFile(archivo)
     nombre = None
-    for s in xl.sheet_names:
-        if s.upper().replace("_PROFILE", "") == hoja_base.upper():
-            nombre = s
+    for hb in hojas_base:
+        for s in xl.sheet_names:
+            if s.upper().replace("_PROFILE", "") == hb.upper():
+                nombre = s
+                break
+        if nombre:
             break
     if nombre is None:
         return None
@@ -426,6 +449,57 @@ def metricas(sim, obs):
 # =============================================================================
 #  PROGRAMA PRINCIPAL
 # =============================================================================
+def verificar_entradas(cont, info):
+    """Revisa que existan los archivos y las columnas necesarias para el
+    contaminante elegido, dando mensajes claros si algo falta."""
+    problemas = []
+
+    # 1) Archivos obligatorios
+    requeridos = {
+        "Inventario CMB": ARCH_INV_CMB,
+        "Inventario FF": ARCH_INV_FF,
+        "Inventario RDST": ARCH_INV_RDST,
+        "Capa de mezcla (ERA5)": ARCH_ERA5,
+        "Estacion CAR (validacion)": ARCH_EST_CAR,
+        "Estacion Guaymaral (fondo)": ARCH_EST_GUA,
+    }
+    for etq, ruta in requeridos.items():
+        if not os.path.exists(ruta):
+            problemas.append(f"   - No se encuentra el archivo de {etq}:\n"
+                             f"       {os.path.basename(ruta)}")
+
+    # 2) Columnas del contaminante en las estaciones
+    def columnas_de(arch):
+        try:
+            raw = pd.read_excel(arch, sheet_name="Sheet1", header=None, nrows=5)
+            return [str(v) for v in raw.iloc[3].tolist()[1:]]
+        except Exception:
+            return []
+
+    if os.path.exists(ARCH_EST_CAR):
+        cols_car = columnas_de(ARCH_EST_CAR)
+        if info["col_car"] not in cols_car:
+            problemas.append(
+                f"   - La estacion CAR no tiene la columna '{info['col_car']}' "
+                f"(necesaria para {cont}).\n       Columnas disponibles: {cols_car}")
+    if os.path.exists(ARCH_EST_GUA):
+        cols_gua = columnas_de(ARCH_EST_GUA)
+        if info["col_gua"] not in cols_gua:
+            problemas.append(
+                f"   - Guaymaral no tiene la columna '{info['col_gua']}' "
+                f"(necesaria para el fondo de {cont}).\n       Columnas: {cols_gua}")
+
+    if problemas:
+        print("!" * 75)
+        print(" FALTAN DATOS O HAY NOMBRES QUE NO COINCIDEN:")
+        print("\n".join(problemas))
+        print("\n Revisa los nombres de archivo en la CONFIGURACION (seccion de")
+        print(" 'Archivos de entrada') y que la estacion descargada incluya el")
+        print(" contaminante elegido. Luego vuelve a ejecutar.")
+        print("!" * 75)
+        raise SystemExit(1)
+
+
 def main():
     os.makedirs(DIR_SALIDA, exist_ok=True)
     cont = CONTAMINANTE.upper()
@@ -433,6 +507,7 @@ def main():
         raise ValueError(f"Contaminante '{cont}' no esta en el MAPEO. "
                          f"Opciones: {list(MAPEO.keys())}")
     info = MAPEO[cont]
+    verificar_entradas(cont, info)
     L = L_KM * 1000.0
     W = W_KM * 1000.0
     k1 = K1_PER_H
@@ -493,6 +568,16 @@ def main():
         unidad = info["unidad_est"]
 
     # fondo b: valor unico (minimo) o serie
+    if np.all(np.isnan(fondo_gm3)):
+        print("!" * 75)
+        print(f" AVISO: la estacion Guaymaral NO tiene datos de {cont} en esta "
+              f"semana,\n        por lo que no se puede calcular la concentracion "
+              f"de fondo (b).")
+        print(f"        -> Descarga una semana con datos de {cont} en Guaymaral,")
+        print(f"           o cambia FECHA_INICIO a una semana con cobertura.")
+        print("!" * 75)
+        raise SystemExit(1)
+
     if MODO_FONDO == "min_global":
         b_val = np.nanmin(fondo_gm3)
         b_serie = np.full(len(idx), b_val)
