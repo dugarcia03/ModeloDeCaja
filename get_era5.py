@@ -21,7 +21,7 @@ def download_and_extract_pblh():
             'variable': ['boundary_layer_height'],
             'year': '2023',
             'month': '03',
-            'day': [f"{d:02d}" for d in range(13, 21)],
+            'day': [f"{d:02d}" for d in range(12, 21)],
             'time': [f"{h:02d}:00" for h in range(24)],
             'area': [4.80, -74.25, 4.50, -74.00],
         },
