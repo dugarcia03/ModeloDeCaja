@@ -189,9 +189,14 @@ DIR_SALIDA    = os.path.join(BASE_DIR, "resultados")
 MAPEO = {
     "CO":   {"hoja_inv": ["CO"],         "col_car": "CO",    "col_gua": "CO",
              "unidad_est": "ppm", "es_pm": False, "peso_mol": 28.01},
-    "PM25": {"hoja_inv": ["PM25"],       "col_car": "PM2.5", "col_gua": "PM2.5",
+    # Para PM se incluyen TODAS las variantes del inventario de resuspension
+    # (RDST): PM10s.ab/PM10c.ab y PM25s.ab/PM25c.ab, ademas del nombre simple
+    # que usan CMB y FF. El lector suma todas las hojas que coincidan.
+    "PM25": {"hoja_inv": ["PM25", "PM25s.ab", "PM25c.ab"],
+             "col_car": "PM2.5", "col_gua": "PM2.5",
              "unidad_est": "ug/m3", "es_pm": True, "peso_mol": None},
-    "PM10": {"hoja_inv": ["PM10"],       "col_car": "PM10",  "col_gua": "PM10",
+    "PM10": {"hoja_inv": ["PM10", "PM10s.ab", "PM10c.ab"],
+             "col_car": "PM10",  "col_gua": "PM10",
              "unidad_est": "ug/m3", "es_pm": True, "peso_mol": None},
     "NOX":  {"hoja_inv": ["NOx"],        "col_car": "NOX",   "col_gua": "NOX",
              "unidad_est": "ppb", "es_pm": False, "peso_mol": 46.01},
@@ -241,31 +246,11 @@ def tipo_dia(ts):
 # =============================================================================
 #  1) LECTURA DE INVENTARIOS -> Q(t) horaria por tipo de dia
 # =============================================================================
-def leer_perfil_inventario(archivo, hojas_base):
-    """Lee la hoja '<X>_profile' (probando varios nombres posibles en
-    'hojas_base') y devuelve un DataFrame con columnas ['wdy','Category', 0..23]
-    y los valores de emision (kg/h) por hora.
-    Devuelve None si ninguna hoja existe (p.ej. CO no esta en RDST)."""
-    if isinstance(hojas_base, str):
-        hojas_base = [hojas_base]
-    xl = pd.ExcelFile(archivo)
-    nombre = None
-    for hb in hojas_base:
-        for s in xl.sheet_names:
-            if s.upper().replace("_PROFILE", "") == hb.upper():
-                nombre = s
-                break
-        if nombre:
-            break
-    if nombre is None:
-        return None
-
+def _leer_una_hoja(archivo, nombre):
+    """Lee una hoja de perfil concreta -> DataFrame ['wdy','Category',0..23]."""
     raw = pd.read_excel(archivo, sheet_name=nombre, header=None)
-    # La fila 11 (0-indexada) contiene el encabezado: wdy, Category, 0,1,...,23
-    # Estructura por POSICION: col0=wdy, col1=Category, col2..col25 = horas 0..23
     datos = raw.iloc[12:].copy()
-    datos = datos[datos.iloc[:, 1].notna()]  # Category no vacia
-
+    datos = datos[datos.iloc[:, 1].notna()]
     registros = []
     for _, fila in datos.iterrows():
         wdy = fila.iloc[0]
@@ -274,7 +259,6 @@ def leer_perfil_inventario(archivo, hojas_base):
         if len(horas) < 24:
             horas = np.pad(horas, (0, 24 - len(horas)))
         registros.append((wdy, cat, horas))
-
     out = pd.DataFrame({
         "wdy": [r[0] for r in registros],
         "Category": [str(r[1]) for r in registros],
@@ -282,6 +266,25 @@ def leer_perfil_inventario(archivo, hojas_base):
     for h in range(24):
         out[h] = [r[2][h] for r in registros]
     return out
+
+
+def leer_perfil_inventario(archivo, hojas_base):
+    """Lee y CONCATENA todas las hojas de perfil cuyo nombre coincida con alguno
+    de los nombres en 'hojas_base'. Esto permite, p.ej., sumar PM10s.ab + PM10c.ab
+    (resuspension en RDST). Devuelve un DataFrame con ['wdy','Category',0..23]
+    en kg/h, o None si ninguna hoja coincide (p.ej. CO no esta en RDST)."""
+    if isinstance(hojas_base, str):
+        hojas_base = [hojas_base]
+    xl = pd.ExcelFile(archivo)
+    objetivos = {hb.upper() for hb in hojas_base}
+    hojas_coincidentes = [
+        s for s in xl.sheet_names
+        if s.upper().replace("_PROFILE", "") in objetivos
+    ]
+    if not hojas_coincidentes:
+        return None
+    partes = [_leer_una_hoja(archivo, s) for s in hojas_coincidentes]
+    return pd.concat(partes, ignore_index=True)
 
 
 def factor_escenario(categoria):
