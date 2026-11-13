@@ -169,8 +169,8 @@ ARCH_INV_CMB  = os.path.join(BASE_DIR, "Summary of CMB_2023m3_adj2.nc.xlsx")
 ARCH_INV_FF   = os.path.join(BASE_DIR, "Summary of FF_2023v2.nc.xlsx")
 ARCH_INV_RDST = os.path.join(BASE_DIR, "Summary of RDST_2023m3_adj2.nc.xlsx")
 ARCH_ERA5     = os.path.join(BASE_DIR, "CapaDeMezcla.csv")
-ARCH_EST_CAR  = os.path.join(BASE_DIR, "StationsReport_20261012223526.xlsx")  # Centro de Alto Rendimiento (validacion)
-ARCH_EST_GUA  = os.path.join(BASE_DIR, "StationsReport_20261012223539.xlsx")  # Guaymaral (fondo)
+ARCH_EST_CAR  = os.path.join(BASE_DIR, "Centro de Alto Rendimiento.xlsx")  # Centro de Alto Rendimiento (validacion)
+ARCH_EST_GUA  = os.path.join(BASE_DIR, "Guaymaral.xlsx")  # Guaymaral (fondo)
 
 # ---- Archivos de salida ----
 DIR_SALIDA    = os.path.join(BASE_DIR, "resultados")
