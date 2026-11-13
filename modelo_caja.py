@@ -92,15 +92,39 @@ MODO_FONDO = "min_global"
 FUENTE_VIENTO = "CAR"
 
 # ---- Escenario de politica publica (cambio en emisiones) ----
-# Reduccion fraccional de la emision Q de ciertas categorias de fuente.
-# Ejemplo: 0.30 = reducir 30% las emisiones de las categorias que empiecen
-# por alguno de los prefijos listados (p.ej. buses/camiones diesel).
-APLICAR_ESCENARIO   = True
-ESCENARIO_NOMBRE    = "Reduccion 30% fuentes diesel de carga/buses"
-ESCENARIO_REDUCCION = 0.30
-# Prefijos de categoria a afectar (segun codigos del inventario, p.ej. "BS_DSEL").
-# Si la lista esta vacia, se aplica la reduccion a TODA la emision.
-ESCENARIO_PREFIJOS  = ["BS_DSEL", "BA_DSEL", "AT_DSEL"]
+# Permite variar la contribucion de CADA tipo de emisor de forma independiente.
+#
+# Las categorias del inventario tienen la forma  PREFIJO_COMBUSTIBLE, p.ej:
+#   AUT_GAS (autos gasolina), M_GAS (motos), TX_GAS (taxis), BS_DSEL (buses diesel)
+#   CC_GAS (carga/comercial), ESB_* (buses SITP), C2/C3/C4+ (camiones), etc.
+#   Prefijo = tipo de fuente | Sufijo = combustible/tecnologia.
+#
+APLICAR_ESCENARIO = True
+ESCENARIO_NOMBRE  = "Escenario de politica publica (ajuste por emisor)"
+
+# FACTORES POR EMISOR: cada entrada multiplica la emision de las categorias que
+# coincidan con el patron (match por prefijo, sufijo o categoria completa).
+#   factor < 1  -> reduce   (0.70 = -30 %)
+#   factor = 1  -> sin cambio
+#   factor > 1  -> aumenta  (1.20 = +20 %)
+#
+# "tipo" indica contra que se compara el patron:
+#   "prefijo"   -> inicio de la categoria antes del "_"  (p.ej. "AUT", "M", "BS")
+#   "sufijo"    -> combustible despues del "_"            (p.ej. "DSEL", "GAS", "GNV")
+#   "categoria" -> nombre completo                        (p.ej. "BS_DSEL")
+#   "contiene"  -> el patron aparece en cualquier parte de la categoria
+#
+# Reglas: se aplican EN ORDEN; si varias afectan a una misma categoria, los
+# factores se MULTIPLICAN entre si. Las categorias no mencionadas quedan igual.
+ESCENARIO_FACTORES = [
+    # patron     tipo         factor   (comentario)
+    ("AUT",      "prefijo",   0.80),   # autos particulares: -20 %
+    ("M",        "prefijo",   0.90),   # motos:              -10 %
+    ("TX",       "prefijo",   0.70),   # taxis:              -30 %
+    ("DSEL",     "sufijo",    0.60),   # todo lo diesel:     -40 %
+    # ("BS",     "prefijo",   0.50),   # ejemplo: buses -50 % (descomentar para usar)
+    # ("GNV",    "sufijo",    1.10),   # ejemplo: +10 % a GNV
+]
 
 # ---- Archivos de entrada (se resuelven respecto a la carpeta del script) ----
 ARCH_INV_CMB  = os.path.join(BASE_DIR, "Summary of CMB_2023m3_adj2.nc.xlsx")
@@ -210,15 +234,37 @@ def leer_perfil_inventario(archivo, hoja_base):
     return out
 
 
+def factor_escenario(categoria):
+    """Devuelve el factor multiplicativo que aplica a una categoria segun las
+    reglas de ESCENARIO_FACTORES. Si varias reglas aplican, se multiplican.
+    Categorias no mencionadas -> factor 1.0 (sin cambio)."""
+    cat = str(categoria)
+    prefijo = cat.split("_")[0] if "_" in cat else cat
+    sufijo = cat.split("_")[1] if "_" in cat else ""
+    factor = 1.0
+    for patron, tipo, f in ESCENARIO_FACTORES:
+        if tipo == "prefijo" and prefijo == patron:
+            factor *= f
+        elif tipo == "sufijo" and sufijo == patron:
+            factor *= f
+        elif tipo == "categoria" and cat == patron:
+            factor *= f
+        elif tipo == "contiene" and patron in cat:
+            factor *= f
+    return factor
+
+
 def construir_Q_por_tipo_dia(contaminante, aplicar_escenario=False):
     """Suma todos los inventarios y categorias -> emision total por tipo de dia
     y por hora, en g/h. Devuelve dict: {tipo_dia: np.array(24) en g/h}.
-    Si aplicar_escenario=True, reduce las categorias indicadas."""
+    Si aplicar_escenario=True, aplica los factores de ESCENARIO_FACTORES a
+    cada categoria (permite variar la contribucion de cada emisor)."""
     hoja = MAPEO[contaminante]["hoja_inv"]
     fuentes = [ARCH_INV_CMB, ARCH_INV_FF, ARCH_INV_RDST]
 
-    acumulado = {}  # {tipo_dia: array(24)}
-    detalle_categorias = {}  # para reporte del escenario
+    acumulado = {}  # {tipo_dia: array(24)}  emision total (con/sin escenario)
+    aporte_base = {}      # {categoria: total kg/h sumado en las 24 h x 3 dias}
+    aporte_escenario = {} # idem pero con el factor aplicado
 
     for arch in fuentes:
         perfil = leer_perfil_inventario(arch, hoja)
@@ -231,22 +277,18 @@ def construir_Q_por_tipo_dia(contaminante, aplicar_escenario=False):
             for _, fila in sub.iterrows():
                 cat = str(fila["Category"])
                 vals = np.array([float(fila[i]) for i in range(24)])  # kg/h
-
-                # --- escenario de politica: reducir ciertas categorias ---
-                if aplicar_escenario:
-                    if (not ESCENARIO_PREFIJOS) or any(
-                        cat.startswith(p) for p in ESCENARIO_PREFIJOS
-                    ):
-                        vals = vals * (1.0 - ESCENARIO_REDUCCION)
+                f = factor_escenario(cat) if aplicar_escenario else 1.0
+                vals_ajust = vals * f
 
                 acumulado.setdefault(td, np.zeros(24))
-                acumulado[td] += vals
-                detalle_categorias.setdefault(cat, 0.0)
-                detalle_categorias[cat] += float(np.nansum(vals))
+                acumulado[td] += vals_ajust
+                aporte_base[cat] = aporte_base.get(cat, 0.0) + float(np.nansum(vals))
+                aporte_escenario[cat] = aporte_escenario.get(cat, 0.0) + float(np.nansum(vals_ajust))
 
     # kg/h -> g/h
     Q = {td: arr * 1000.0 for td, arr in acumulado.items()}
-    return Q, detalle_categorias
+    detalle = {"base": aporte_base, "escenario": aporte_escenario}
+    return Q, detalle
 
 
 def serie_Q_ventana(Q_tipo_dia, indice):
@@ -478,7 +520,7 @@ def main():
     # --- 6) Escenario de politica publica ---
     sim_esc = None
     if APLICAR_ESCENARIO:
-        Q_td_e, _ = construir_Q_por_tipo_dia(cont, aplicar_escenario=True)
+        Q_td_e, detalle = construir_Q_por_tipo_dia(cont, aplicar_escenario=True)
         Qserie_e = serie_Q_ventana(Q_td_e, idx)
         C_esc_gm3 = correr_modelo(idx, Qserie_e, b_serie, u_serie, H_serie,
                                   C0_ini, L, W, k1)
@@ -488,8 +530,22 @@ def main():
                                      np.where(sim_base == 0, np.nan, sim_base))
         print("-" * 75)
         print(f" ESCENARIO: {ESCENARIO_NOMBRE}")
-        print(f"   Reduccion media de concentracion: {red_media:.3f} {unidad} "
-              f"({red_pct:.1f} %)")
+
+        # Reporte del cambio total de emisiones y por emisor afectado
+        base = detalle["base"]
+        esc = detalle["escenario"]
+        tot_base = sum(base.values())
+        tot_esc = sum(esc.values())
+        print(f"   Emision total {cont}: {tot_base:.1f} -> {tot_esc:.1f} kg/h "
+              f"({100*(tot_esc-tot_base)/tot_base:+.1f} %)")
+        print("   Emisores modificados (aporte sobre emision total base):")
+        afectadas = [c for c in base if abs(esc[c] - base[c]) > 1e-9]
+        for c in sorted(afectadas, key=lambda x: -base[x]):
+            print(f"     {c:12s} {base[c]:9.1f} -> {esc[c]:9.1f} kg/h  "
+                  f"({100*(esc[c]-base[c])/base[c]:+5.1f} %)  "
+                  f"[{100*base[c]/tot_base:4.1f}% del total]")
+        print(f"   Respuesta del modelo -> reduccion media de concentracion: "
+              f"{red_media:.3f} {unidad} ({red_pct:.1f} %)")
 
     # --- 7) Exportar CSV de resultados ---
     salida = pd.DataFrame({
