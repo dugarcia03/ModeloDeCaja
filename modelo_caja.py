@@ -54,10 +54,17 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 #  >>>>>>>>>>>>>>>>>>>>>>  CONFIGURACION (EDITAR AQUI)  <<<<<<<<<<<<<<<<<<<<<<<
 # =============================================================================
 
-# ---- Contaminante a simular ----
-# Opciones tipicas segun inventario y estaciones: "CO", "PM25", "NOX"
-# (Para empezar y validar con el ejemplo del profesor, usar "CO").
-CONTAMINANTE = "CO"
+# ---- Contaminante(s) a simular ----
+# Puede ser:
+#   - "AUTO"  : procesa automaticamente TODOS los contaminantes de la lista
+#               CONTAMINANTES_AUTO que tengan datos validos (inventario +
+#               estacion + fondo). Genera grafica y CSV para cada uno.
+#   - un nombre unico, p.ej. "CO", "PM25", "PM10", "NOX", "SO2".
+CONTAMINANTE = "AUTO"
+
+# Lista de contaminantes a intentar cuando CONTAMINANTE = "AUTO".
+# Los que no tengan datos suficientes se saltan con un aviso (no detienen el resto).
+CONTAMINANTES_AUTO = ["CO", "PM25", "PM10", "NOX", "SO2"]
 
 # ---- Ventana temporal de la simulacion ----
 FECHA_INICIO = "2023-03-13"   # Lunes 00:00 (hora local COT). Editable.
@@ -67,10 +74,30 @@ N_DIAS       = 7              # 7 dias = 168 horas
 L_KM = 20.0   # largo de la caja [km]
 W_KM = 40.0   # ancho de la caja [km]
 
-# ---- Cinetica de reaccion de primer orden ----
-# k1 = 0  -> contaminante NO reactivo (CO, PM). Mantener en 0 salvo reactivos.
-# Para reactivos (p.ej. NOX) se puede asignar un k1 efectivo [1/h].
-K1_PER_H = 0.0
+# ---- Cinetica de reaccion de primer orden k1 [1/h], POR contaminante ----
+# El modelo de caja usa cinetica de PRIMER ORDEN: dC/dt = ... - k1*C.
+#
+#   k1 = 0    -> contaminante NO reactivo / inerte en el box model.
+#   k1 > 0    -> decaimiento efectivo de primer orden (contaminante reactivo).
+#
+# Valores por defecto:
+#   CO, PM2.5, PM10 -> 0.0  (inertes para el modelo de caja).
+#   NOx, SO2        -> 0.0  por defecto (tratados como inertes). Se dejan abajo,
+#                     comentados, valores efectivos tipicos de literatura listos
+#                     para activar si se desea un tratamiento reactivo.
+#
+# Nota sobre la Tabla 6.3 (VOC/NOx): esas constantes son de reacciones de
+# SEGUNDO orden [cm3/(molec s)]; para usarlas como k1 efectivo de primer orden
+# habria que multiplicarlas por la concentracion de la otra especie (p.ej. para
+# NO + O3, multiplicar por [O3]). Por eso NO se usan directamente aqui; el k1
+# efectivo se deja como un parametro agregado y editable.
+K1_POR_CONTAMINANTE = {
+    "CO":   0.0,
+    "PM25": 0.0,
+    "PM10": 0.0,
+    "NOX":  0.0,   # reactivo; p.ej. activar ~0.3  (decaimiento efectivo diurno)
+    "SO2":  0.0,   # reactivo; p.ej. activar ~0.02 (oxidacion lenta a sulfato)
+}
 
 # ---- Zona horaria de la capa de mezcla (ERA5) ----
 # ERA5 viene en UTC; las estaciones estan en hora local COT = UTC-5.
@@ -449,134 +476,65 @@ def metricas(sim, obs):
 # =============================================================================
 #  PROGRAMA PRINCIPAL
 # =============================================================================
-def verificar_entradas(cont, info):
-    """Revisa que existan los archivos y las columnas necesarias para el
-    contaminante elegido, dando mensajes claros si algo falta."""
-    problemas = []
-
-    # 1) Archivos obligatorios
-    requeridos = {
-        "Inventario CMB": ARCH_INV_CMB,
-        "Inventario FF": ARCH_INV_FF,
-        "Inventario RDST": ARCH_INV_RDST,
-        "Capa de mezcla (ERA5)": ARCH_ERA5,
-        "Estacion CAR (validacion)": ARCH_EST_CAR,
-        "Estacion Guaymaral (fondo)": ARCH_EST_GUA,
-    }
-    for etq, ruta in requeridos.items():
-        if not os.path.exists(ruta):
-            problemas.append(f"   - No se encuentra el archivo de {etq}:\n"
-                             f"       {os.path.basename(ruta)}")
-
-    # 2) Columnas del contaminante en las estaciones
-    def columnas_de(arch):
-        try:
-            raw = pd.read_excel(arch, sheet_name="Sheet1", header=None, nrows=5)
-            return [str(v) for v in raw.iloc[3].tolist()[1:]]
-        except Exception:
-            return []
-
-    if os.path.exists(ARCH_EST_CAR):
-        cols_car = columnas_de(ARCH_EST_CAR)
-        if info["col_car"] not in cols_car:
-            problemas.append(
-                f"   - La estacion CAR no tiene la columna '{info['col_car']}' "
-                f"(necesaria para {cont}).\n       Columnas disponibles: {cols_car}")
-    if os.path.exists(ARCH_EST_GUA):
-        cols_gua = columnas_de(ARCH_EST_GUA)
-        if info["col_gua"] not in cols_gua:
-            problemas.append(
-                f"   - Guaymaral no tiene la columna '{info['col_gua']}' "
-                f"(necesaria para el fondo de {cont}).\n       Columnas: {cols_gua}")
-
-    if problemas:
-        print("!" * 75)
-        print(" FALTAN DATOS O HAY NOMBRES QUE NO COINCIDEN:")
-        print("\n".join(problemas))
-        print("\n Revisa los nombres de archivo en la CONFIGURACION (seccion de")
-        print(" 'Archivos de entrada') y que la estacion descargada incluya el")
-        print(" contaminante elegido. Luego vuelve a ejecutar.")
-        print("!" * 75)
-        raise SystemExit(1)
-
-
-def main():
-    os.makedirs(DIR_SALIDA, exist_ok=True)
-    cont = CONTAMINANTE.upper()
+def procesar_contaminante(cont, idx, H_serie, car, gua):
+    """Corre el modelo completo para UN contaminante y genera su grafica + CSV.
+    Devuelve un dict con las metricas (o None si no hay datos suficientes,
+    p.ej. sin fondo en Guaymaral), sin detener el resto de contaminantes."""
+    cont = cont.upper()
     if cont not in MAPEO:
-        raise ValueError(f"Contaminante '{cont}' no esta en el MAPEO. "
-                         f"Opciones: {list(MAPEO.keys())}")
+        print(f" [SALTADO] '{cont}' no esta en el MAPEO de contaminantes.")
+        return None
     info = MAPEO[cont]
-    verificar_entradas(cont, info)
     L = L_KM * 1000.0
     W = W_KM * 1000.0
-    k1 = K1_PER_H
+    k1 = K1_POR_CONTAMINANTE.get(cont, 0.0)
 
     print("=" * 75)
-    print(f" MODELO DE CAJA NO ESTACIONARIO  |  Contaminante: {cont}")
-    print(f" Ventana: {FECHA_INICIO} 00:00  +{N_DIAS} dias ({N_DIAS*24} h)  "
-          f"|  Caja: {L_KM} x {W_KM} km  |  k1 = {k1} 1/h")
-    print("=" * 75)
-
-    idx = ventana_horaria()
+    print(f" CONTAMINANTE: {cont}   |  k1 = {k1} 1/h")
+    print("-" * 75)
 
     # --- 1) Emisiones Q(t) [g/h] (caso base) ---
     Q_td, _ = construir_Q_por_tipo_dia(cont, aplicar_escenario=False)
     if not Q_td:
-        raise RuntimeError(f"No se encontraron emisiones de {cont} en los "
-                          f"inventarios (revisar nombre de hoja).")
+        print(f" [SALTADO] No hay emisiones de {cont} en los inventarios.")
+        return None
     Qserie = serie_Q_ventana(Q_td, idx)
     print(f" Emisiones {cont}: Q medio = {np.nanmean(Qserie):.3e} g/h "
           f"({np.nanmean(Qserie)/1e6:.2f} ton/h)")
 
-    # --- 2) Capa de mezcla H(t) [m] ---
-    H_serie = leer_capa_mezcla(idx)
-    print(f" Capa de mezcla H: {np.nanmin(H_serie):.0f} - {np.nanmax(H_serie):.0f} m "
-          f"(faltan {np.isnan(H_serie).sum()} h)")
-
-    # --- 3) Estaciones ---
-    car = leer_estacion(ARCH_EST_CAR)
-    gua = leer_estacion(ARCH_EST_GUA)
-
-    # viento u(t) [m/s]
+    # --- 2) Viento u(t) ---
     if FUENTE_VIENTO == "CAR":
         u_serie = serie_columna(car, "Vel Viento", idx)
     else:
         u_serie = serie_columna(gua, "Vel Viento 10M", idx)
-    print(f" Viento u ({FUENTE_VIENTO}): medio = {np.nanmean(u_serie):.2f} m/s "
-          f"(faltan {np.isnan(u_serie).sum()} h)")
 
-    # observado para validacion (CAR)
-    obs_est = serie_columna(car, info["col_car"], idx)      # en unidades de estacion
-    # fondo (Guaymaral)
-    fondo_est = serie_columna(gua, info["col_gua"], idx)    # en unidades de estacion
+    # observado (CAR) y fondo (Guaymaral), en unidades de estacion
+    obs_est = serie_columna(car, info["col_car"], idx)
+    fondo_est = serie_columna(gua, info["col_gua"], idx)
 
-    # --- 4) Pasar todo a g/m3 para el modelo ---
+    # --- 3) Conversion de unidades a g/m3 ---
     if info["es_pm"]:
         obs_gm3 = ugm3_a_gm3(obs_est)
         fondo_gm3 = ugm3_a_gm3(fondo_est)
-        to_user = gm3_a_ugm3          # para mostrar resultados
+        to_user = gm3_a_ugm3
         unidad = "ug/m3"
     else:
         pm = info["peso_mol"]
-        obs_gm3 = ppm_a_gm3(obs_est, pm) if info["unidad_est"] == "ppm" \
-            else ppm_a_gm3(obs_est * 1e-3, pm)  # ppb -> ppm
-        fondo_gm3 = ppm_a_gm3(fondo_est, pm) if info["unidad_est"] == "ppm" \
-            else ppm_a_gm3(fondo_est * 1e-3, pm)
-        to_user = (lambda x: gm3_a_ppm(x, pm)) if info["unidad_est"] == "ppm" \
-            else (lambda x: gm3_a_ppm(x, pm) * 1e3)
+        if info["unidad_est"] == "ppm":
+            obs_gm3 = ppm_a_gm3(obs_est, pm)
+            fondo_gm3 = ppm_a_gm3(fondo_est, pm)
+            to_user = (lambda x: gm3_a_ppm(x, pm))
+        else:  # ppb
+            obs_gm3 = ppm_a_gm3(obs_est * 1e-3, pm)
+            fondo_gm3 = ppm_a_gm3(fondo_est * 1e-3, pm)
+            to_user = (lambda x: gm3_a_ppm(x, pm) * 1e3)
         unidad = info["unidad_est"]
 
-    # fondo b: valor unico (minimo) o serie
+    # --- 4) Fondo b ---
     if np.all(np.isnan(fondo_gm3)):
-        print("!" * 75)
-        print(f" AVISO: la estacion Guaymaral NO tiene datos de {cont} en esta "
-              f"semana,\n        por lo que no se puede calcular la concentracion "
-              f"de fondo (b).")
-        print(f"        -> Descarga una semana con datos de {cont} en Guaymaral,")
-        print(f"           o cambia FECHA_INICIO a una semana con cobertura.")
-        print("!" * 75)
-        raise SystemExit(1)
+        print(f" [SALTADO] Guaymaral no tiene datos de {cont} en esta semana "
+              f"-> sin fondo (b). Descarga una semana con cobertura de {cont}.")
+        return None
 
     if MODO_FONDO == "min_global":
         b_val = np.nanmin(fondo_gm3)
@@ -586,23 +544,21 @@ def main():
         b_serie = fondo_gm3
         print(f" Fondo b (serie Guaymaral): faltan {np.isnan(b_serie).sum()} h")
 
-    # condicion inicial C0: primer observado disponible o el fondo
     primeros_obs = obs_gm3[~np.isnan(obs_gm3)]
     C0_ini = primeros_obs[0] if primeros_obs.size else np.nanmin(fondo_gm3)
 
-    # --- 5) Correr modelo (caso base) ---
+    # --- 5) Modelo (caso base) ---
     C_base_gm3 = correr_modelo(idx, Qserie, b_serie, u_serie, H_serie,
                               C0_ini, L, W, k1)
     sim_base = to_user(C_base_gm3)
     obs_user = to_user(obs_gm3)
 
     met = metricas(sim_base, obs_user)
-    print("-" * 75)
-    print(f" DESEMPENO (simulado vs observado CAR) [{unidad}]:")
-    print(f"   n = {met['n']}  |  RMSE = {met['RMSE']:.3f}  |  MBE = {met['MBE']:.3f}"
-          f"  |  MAE = {met['MAE']:.3f}  |  r = {met['r']:.3f}")
+    print(f" DESEMPENO (sim vs obs CAR) [{unidad}]: n={met['n']} | "
+          f"RMSE={met['RMSE']:.3f} | MBE={met['MBE']:.3f} | "
+          f"MAE={met['MAE']:.3f} | r={met['r']:.3f}")
 
-    # --- 6) Escenario de politica publica ---
+    # --- 6) Escenario de politica ---
     sim_esc = None
     if APLICAR_ESCENARIO:
         Q_td_e, detalle = construir_Q_por_tipo_dia(cont, aplicar_escenario=True)
@@ -611,28 +567,13 @@ def main():
                                   C0_ini, L, W, k1)
         sim_esc = to_user(C_esc_gm3)
         red_media = np.nanmean(sim_base - sim_esc)
-        red_pct = 100.0 * np.nanmean((sim_base - sim_esc) /
-                                     np.where(sim_base == 0, np.nan, sim_base))
-        print("-" * 75)
-        print(f" ESCENARIO: {ESCENARIO_NOMBRE}")
+        base = detalle["base"]; esc = detalle["escenario"]
+        tot_base = sum(base.values()); tot_esc = sum(esc.values())
+        cambio_emis = 100 * (tot_esc - tot_base) / tot_base if tot_base else 0.0
+        print(f" ESCENARIO '{ESCENARIO_NOMBRE}': emision {cambio_emis:+.1f}% "
+              f"-> concentracion {red_media:+.3f} {unidad} en promedio")
 
-        # Reporte del cambio total de emisiones y por emisor afectado
-        base = detalle["base"]
-        esc = detalle["escenario"]
-        tot_base = sum(base.values())
-        tot_esc = sum(esc.values())
-        print(f"   Emision total {cont}: {tot_base:.1f} -> {tot_esc:.1f} kg/h "
-              f"({100*(tot_esc-tot_base)/tot_base:+.1f} %)")
-        print("   Emisores modificados (aporte sobre emision total base):")
-        afectadas = [c for c in base if abs(esc[c] - base[c]) > 1e-9]
-        for c in sorted(afectadas, key=lambda x: -base[x]):
-            print(f"     {c:12s} {base[c]:9.1f} -> {esc[c]:9.1f} kg/h  "
-                  f"({100*(esc[c]-base[c])/base[c]:+5.1f} %)  "
-                  f"[{100*base[c]/tot_base:4.1f}% del total]")
-        print(f"   Respuesta del modelo -> reduccion media de concentracion: "
-              f"{red_media:.3f} {unidad} ({red_pct:.1f} %)")
-
-    # --- 7) Exportar CSV de resultados ---
+    # --- 7) CSV ---
     salida = pd.DataFrame({
         "fecha_hora": idx,
         "tipo_dia": [tipo_dia(t) for t in idx],
@@ -647,13 +588,11 @@ def main():
         salida[f"sim_escenario_{unidad}"] = sim_esc
     csv_path = os.path.join(DIR_SALIDA, f"resultados_{cont}.csv")
     salida.to_csv(csv_path, index=False)
-    print("-" * 75)
-    print(f" CSV de resultados: {csv_path}")
 
     # --- 8) Graficas ---
-    # (a) Simulado vs observado
+    # (a) Serie temporal
     fig, ax = plt.subplots(figsize=(13, 5))
-    ax.plot(idx, obs_user, color="black", lw=1.6, label=f"Observado CAR")
+    ax.plot(idx, obs_user, color="black", lw=1.6, label="Observado CAR")
     ax.plot(idx, sim_base, color="tab:red", lw=1.6, label="Simulado (base)")
     if sim_esc is not None:
         ax.plot(idx, sim_esc, color="tab:green", lw=1.4, ls="--",
@@ -669,13 +608,14 @@ def main():
     fig.savefig(fig1, dpi=130)
     plt.close(fig)
 
-    # (b) Dispersion simulado vs observado
+    # (b) Dispersion
     fig, ax = plt.subplots(figsize=(5.5, 5.5))
-    m = ~np.isnan(sim_base) & ~np.isnan(obs_user)
-    ax.scatter(obs_user[m], sim_base[m], s=18, alpha=0.6, color="tab:blue")
-    lim = [0, np.nanmax([np.nanmax(obs_user[m]) if m.any() else 1,
-                         np.nanmax(sim_base[m]) if m.any() else 1])]
-    ax.plot(lim, lim, "k--", lw=1, label="1:1")
+    mask = ~np.isnan(sim_base) & ~np.isnan(obs_user)
+    ax.scatter(obs_user[mask], sim_base[mask], s=18, alpha=0.6, color="tab:blue")
+    vmax = 1.0
+    if mask.any():
+        vmax = np.nanmax([np.nanmax(obs_user[mask]), np.nanmax(sim_base[mask])])
+    ax.plot([0, vmax], [0, vmax], "k--", lw=1, label="1:1")
     ax.set_xlabel(f"Observado [{unidad}]")
     ax.set_ylabel(f"Simulado [{unidad}]")
     ax.set_title(f"Dispersion {cont} (r = {met['r']:.3f})")
@@ -686,10 +626,91 @@ def main():
     fig.savefig(fig2, dpi=130)
     plt.close(fig)
 
-    print(f" Figuras: {fig1}  |  {fig2}")
-    print("=" * 75)
+    print(f" Figuras: {os.path.basename(fig1)} | {os.path.basename(fig2)}  "
+          f"|  CSV: {os.path.basename(csv_path)}")
+
+    met_out = dict(met)
+    met_out["contaminante"] = cont
+    met_out["unidad"] = unidad
+    return met_out
+
+
+def ejecutar():
+    """Orquesta la corrida: prepara datos comunes (H, estaciones) y procesa uno
+    o todos los contaminantes segun la configuracion."""
+    os.makedirs(DIR_SALIDA, exist_ok=True)
+
+    # Lista de contaminantes a procesar
+    if CONTAMINANTE.upper() == "AUTO":
+        lista = [c.upper() for c in CONTAMINANTES_AUTO]
+    else:
+        lista = [CONTAMINANTE.upper()]
+
+    # Verificar que existan los archivos base comunes (inventarios, ERA5, estaciones)
+    for etq, ruta in [("Inventario CMB", ARCH_INV_CMB),
+                      ("Inventario FF", ARCH_INV_FF),
+                      ("Inventario RDST", ARCH_INV_RDST),
+                      ("Capa de mezcla (ERA5)", ARCH_ERA5),
+                      ("Estacion CAR", ARCH_EST_CAR),
+                      ("Estacion Guaymaral", ARCH_EST_GUA)]:
+        if not os.path.exists(ruta):
+            print("!" * 75)
+            print(f" No se encuentra el archivo de {etq}: {os.path.basename(ruta)}")
+            print(" Revisa la seccion 'Archivos de entrada' en la CONFIGURACION.")
+            print("!" * 75)
+            raise SystemExit(1)
+
+    print("#" * 75)
+    print(f" MODELO DE CAJA NO ESTACIONARIO - CALIDAD DEL AIRE (Bogota)")
+    print(f" Ventana: {FECHA_INICIO} 00:00  +{N_DIAS} dias ({N_DIAS*24} h)  "
+          f"|  Caja: {L_KM} x {W_KM} km")
+    print(f" Contaminantes a procesar: {', '.join(lista)}")
+    print("#" * 75)
+
+    # Datos comunes (se leen una sola vez)
+    idx = ventana_horaria()
+    H_serie = leer_capa_mezcla(idx)
+    print(f" Capa de mezcla H: {np.nanmin(H_serie):.0f} - {np.nanmax(H_serie):.0f} m "
+          f"(faltan {np.isnan(H_serie).sum()} h)")
+    car = leer_estacion(ARCH_EST_CAR)
+    gua = leer_estacion(ARCH_EST_GUA)
+    if FUENTE_VIENTO == "CAR":
+        u_chk = serie_columna(car, "Vel Viento", idx)
+    else:
+        u_chk = serie_columna(gua, "Vel Viento 10M", idx)
+    print(f" Viento u ({FUENTE_VIENTO}): medio = {np.nanmean(u_chk):.2f} m/s "
+          f"(faltan {np.isnan(u_chk).sum()} h)")
+
+    # Procesar cada contaminante
+    resumen = []
+    for cont in lista:
+        met = procesar_contaminante(cont, idx, H_serie, car, gua)
+        if met is not None:
+            resumen.append(met)
+
+    # Resumen comparativo final
+    print("#" * 75)
+    print(" RESUMEN DE DESEMPENO (todos los contaminantes procesados)")
+    print("#" * 75)
+    if resumen:
+        print(f" {'Contam.':8s} {'unid.':6s} {'n':>4s} {'RMSE':>9s} "
+              f"{'MBE':>9s} {'MAE':>9s} {'r':>7s}")
+        for m in resumen:
+            print(f" {m['contaminante']:8s} {m['unidad']:6s} {m['n']:4d} "
+                  f"{m['RMSE']:9.3f} {m['MBE']:9.3f} {m['MAE']:9.3f} {m['r']:7.3f}")
+        # Guardar resumen como CSV
+        df_res = pd.DataFrame(resumen)[
+            ["contaminante", "unidad", "n", "RMSE", "MBE", "MAE", "r"]]
+        res_csv = os.path.join(DIR_SALIDA, "resumen_metricas.csv")
+        df_res.to_csv(res_csv, index=False)
+        print("-" * 75)
+        print(f" Resumen guardado en: {os.path.basename(res_csv)}")
+        print(f" Figuras y CSV de cada contaminante estan en: {DIR_SALIDA}/")
+    else:
+        print(" Ningun contaminante pudo procesarse con los datos actuales.")
+    print("#" * 75)
     print(" Listo.")
 
 
 if __name__ == "__main__":
-    main()
+    ejecutar()
