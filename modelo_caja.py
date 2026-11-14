@@ -127,7 +127,7 @@ FUENTE_VIENTO = "CAR"
 #   Prefijo = tipo de fuente | Sufijo = combustible/tecnologia.
 #
 APLICAR_ESCENARIO = True
-ESCENARIO_NOMBRE  = "Escenario de politica publica (ajuste por emisor)"
+ESCENARIO_NOMBRE  = "Pico y placa extendido para vehiculos particulares (autos -30%)"
 
 # FACTORES POR EMISOR: cada entrada multiplica la emision de las categorias que
 # coincidan con el patron (match por prefijo, sufijo o categoria completa).
@@ -145,12 +145,12 @@ ESCENARIO_NOMBRE  = "Escenario de politica publica (ajuste por emisor)"
 # factores se MULTIPLICAN entre si. Las categorias no mencionadas quedan igual.
 ESCENARIO_FACTORES = [
     # patron     tipo         factor   (comentario)
-    ("AUT",      "prefijo",   0.80),   # autos particulares: -20 %
-    ("M",        "prefijo",   0.90),   # motos:              -10 %
-    ("TX",       "prefijo",   0.70),   # taxis:              -30 %
-    ("DSEL",     "sufijo",    0.60),   # todo lo diesel:     -40 %
-    # ("BS",     "prefijo",   0.50),   # ejemplo: buses -50 % (descomentar para usar)
-    # ("GNV",    "sufijo",    1.10),   # ejemplo: +10 % a GNV
+    ("AUT",      "prefijo",   0.70),   # autos particulares: -30 % (pico y placa extendido)
+    # --- Otras medidas disponibles (descomentar para combinar) ---
+    # ("M",      "prefijo",   0.70),   # motos:  -30 %
+    # ("TX",     "prefijo",   0.70),   # taxis:  -30 %
+    # ("BS",     "prefijo",   0.86),   # buses:  -14 % (electrificacion actual)
+    # ("DSEL",   "sufijo",    0.60),   # diesel: -40 %
 ]
 
 # ---- Archivos de entrada (se resuelven respecto a la carpeta del script) ----
